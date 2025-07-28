@@ -562,7 +562,7 @@ public partial class SipWebRtcGateway
                 if (!string.IsNullOrEmpty(targetSessionId) && _webSocketClients.ContainsKey(targetSessionId))
                 {
                     // This is Alice calling Bob - create a call bridge
-                    await HandleAliceToBobCall(sessionId, targetSessionId, sipRequest);
+                    await HandleAliceToBobCall(sessionId, targetSessionId);
                 }
             }
         }
