@@ -24,6 +24,19 @@ public partial class SipWebRtcGateway
     protected ILogger<SipWebRtcGateway> _logger;
     protected ILoggerFactory _loggerFactory;
 
+    // 在 SipWebRtcGateway 類別中添加新的欄位來追蹤橋接通話狀態
+    private Dictionary<string, BridgeCallState> _bridgeCallStates = new();
+
+    // 添加橋接通話狀態類別
+    public class BridgeCallState
+    {
+        public string AliceSessionId { get; set; }
+        public string BobSessionId { get; set; }
+        public bool AliceAccepted { get; set; }
+        public bool BobAccepted { get; set; }
+        public string BridgeId { get; set; }
+    }
+
     public SipWebRtcGateway(ILogger<SipWebRtcGateway> logger, ILoggerFactory factory)
     {
         _logger = logger;
@@ -141,7 +154,7 @@ public partial class SipWebRtcGateway
 
             // Create call bridge
             var bridge = new CallBridge(_loggerFactory.CreateLogger<CallBridge>());
-            var bridgeCreated = await bridge.CreateBridge(aliceSessionId, bobSessionId, aliceTransport, bobTransport);
+            var bridgeCreated = await bridge.EstablishBridge(aliceSessionId, bobSessionId, aliceTransport, bobTransport);
             
             if (bridgeCreated)
             {
@@ -175,7 +188,82 @@ public partial class SipWebRtcGateway
             _logger.LogError(ex, $"Error creating Alice to Bob call bridge");
         }
     }
+    private async Task HandleRegularSipCall(string sessionId, string sipUri)
+    {
+        try
+        {
+            // Get the SIP transport for this session
+            if (!_sipTransports.TryGetValue(sessionId, out SIPTransport? sipTransport))
+            {
+                _logger.LogError($"No SIP transport found for session {sessionId}");
+                await NotifyBrowserClient(sessionId, "call-failed", "No SIP transport available");
+                return;
+            }
 
+            var sipUserAgent = new SIPUserAgent(sipTransport, null);
+            _sipCalls[sessionId] = sipUserAgent;
+
+            // Create or get existing WebRTC peer connection
+            RTCPeerConnection peerConnection;
+            if (!_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
+            {
+                peerConnection = await CreateWebRtcPeerConnection(sessionId);
+            }
+            else
+            {
+                peerConnection = value;
+            }
+
+            // Create WebRTC offer
+            var offer = peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            // Send offer to browser
+            await NotifyBrowserClient(sessionId, "offer", offer);
+
+            // Create media session
+            var mediaSession = new VoIPMediaSession();
+            _mediaSessions[sessionId] = mediaSession;
+
+            // Create call session
+            var callSession = new CallSession
+            {
+                SipTransport = sipTransport,
+                SipUserAgent = sipUserAgent,
+                WebRtcPeer = peerConnection,
+                MediaSession = mediaSession
+            };
+            _callSessions[sessionId] = callSession;
+
+            // Set up RTP bridging from SIP to WebRTC
+            mediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
+            {
+                if (_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
+                {
+                    value.SendRtpRaw(media, rtpPkt.Payload,
+                        rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
+                }
+            };
+
+            // Initiate SIP call
+            var callResult = await sipUserAgent.Call(sipUri, null, null, mediaSession);
+
+            if (callResult)
+            {
+                _logger.LogInformation($"SIP call successfully initiated to {sipUri}");
+            }
+            else
+            {
+                _logger.LogInformation($"Failed to initiate SIP call to {sipUri}");
+                await NotifyBrowserClient(sessionId, "call-failed", $"Failed to call {sipUri}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation($"Error initiating SIP call: {ex.Message}");
+            await NotifyBrowserClient(sessionId, "call-failed", ex.Message);
+        }
+    }
     private string? ExtractSessionIdFromUri(string uri)
     {
         // Extract session ID from URI like "sip:sessionId@domain.com"
@@ -376,21 +464,36 @@ public partial class SipWebRtcGateway
     {
         try
         {
-            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
-                _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            // 檢查是否有待處理的橋接通話
+            var bridgeCallState = _bridgeCallStates.Values.FirstOrDefault(s => 
+                s.AliceSessionId == sessionId || s.BobSessionId == sessionId);
+
+            if (bridgeCallState != null)
             {
-                // The call bridge is already created, just notify the other party
-                var bridgeInfo = JsonSerializer.Deserialize<BridgeCallInfo>(JsonSerializer.Serialize(data));
-                
-                // Find the other session in this bridge
-                var otherSessionId = _sessionToBridge.FirstOrDefault(x => x.Value == bridgeId && x.Key != sessionId).Key;
-                if (!string.IsNullOrEmpty(otherSessionId))
+                // 更新接受狀態
+                if (sessionId == bridgeCallState.AliceSessionId)
                 {
-                    await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
-                    {
-                        bridgeId = bridgeId,
-                        acceptedBy = sessionId
-                    });
+                    bridgeCallState.AliceAccepted = true;
+                }
+                else if (sessionId == bridgeCallState.BobSessionId)
+                {
+                    bridgeCallState.BobAccepted = true;
+                }
+
+                // 通知另一方已接受
+                var otherSessionId = sessionId == bridgeCallState.AliceSessionId 
+                    ? bridgeCallState.BobSessionId 
+                    : bridgeCallState.AliceSessionId;
+
+                await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
+                {
+                    acceptedBy = sessionId
+                });
+
+                // 如果雙方都接受了，建立橋接
+                if (bridgeCallState.AliceAccepted && bridgeCallState.BobAccepted)
+                {
+                    await EstablishBridge(bridgeCallState);
                 }
             }
         }
@@ -562,7 +665,7 @@ public partial class SipWebRtcGateway
                 if (!string.IsNullOrEmpty(targetSessionId) && _webSocketClients.ContainsKey(targetSessionId))
                 {
                     // This is Alice calling Bob - create a call bridge
-                    await HandleAliceToBobCall(sessionId, targetSessionId);
+                    await HandleBridgeCall(sessionId, targetSessionId, sipUri);
                 }
             }
         }
@@ -670,5 +773,125 @@ public partial class SipWebRtcGateway
         _sessionToBridge.Clear();
 
         _logger.LogInformation("SIP-WebRTC Gateway stopped");
+    }
+
+    // 添加 EstablishBridge 方法
+    private async Task EstablishBridge(BridgeCallState bridgeCallState)
+    {
+        try
+        {
+            _logger.LogInformation($"Establishing bridge for Alice ({bridgeCallState.AliceSessionId}) and Bob ({bridgeCallState.BobSessionId})");
+
+            // 通知客戶端橋接正在建立
+            await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-establishing", new
+            {
+                bridgeId = bridgeCallState.BridgeId,
+                targetSessionId = bridgeCallState.BobSessionId
+            });
+
+            await NotifyBrowserClient(bridgeCallState.BobSessionId, "bridge-establishing", new
+            {
+                bridgeId = bridgeCallState.BridgeId,
+                targetSessionId = bridgeCallState.AliceSessionId
+            });
+
+            // 獲取 SIP transports
+            if (!_sipTransports.TryGetValue(bridgeCallState.AliceSessionId, out SIPTransport? aliceTransport) ||
+                !_sipTransports.TryGetValue(bridgeCallState.BobSessionId, out SIPTransport? bobTransport))
+            {
+                _logger.LogError($"Missing SIP transport for bridge establishment");
+                return;
+            }
+
+            // 建立 CallBridge
+            var bridge = new CallBridge(_loggerFactory.CreateLogger<CallBridge>());
+            var bridgeCreated = await bridge.EstablishBridge(
+                bridgeCallState.AliceSessionId, 
+                bridgeCallState.BobSessionId, 
+                aliceTransport, 
+                bobTransport);
+
+            if (bridgeCreated)
+            {
+                // 儲存橋接
+                _callBridges[bridge.BridgeId] = bridge;
+                _sessionToBridge[bridgeCallState.AliceSessionId] = bridge.BridgeId;
+                _sessionToBridge[bridgeCallState.BobSessionId] = bridge.BridgeId;
+
+                // 通知客戶端橋接已建立
+                await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-established", new
+                {
+                    bridgeId = bridge.BridgeId,
+                    targetSessionId = bridgeCallState.BobSessionId
+                });
+
+                await NotifyBrowserClient(bridgeCallState.BobSessionId, "bridge-established", new
+                {
+                    bridgeId = bridge.BridgeId,
+                    targetSessionId = bridgeCallState.AliceSessionId
+                });
+
+                _logger.LogInformation($"Bridge {bridge.BridgeId} established successfully");
+            }
+            else
+            {
+                _logger.LogError($"Failed to create bridge");
+                await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-failed", "Failed to establish bridge");
+                await NotifyBrowserClient(bridgeCallState.BobSessionId, "bridge-failed", "Failed to establish bridge");
+            }
+
+            // 清理橋接通話狀態
+            _bridgeCallStates.Remove(bridgeCallState.BridgeId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error establishing bridge");
+        }
+    }
+
+    // 修改 HandleBridgeCall 方法（在 InitiateSipCall 中呼叫）
+    private async Task HandleBridgeCall(string aliceSessionId, string bobSessionId, string sipUri)
+    {
+        try
+        {
+            _logger.LogInformation($"Creating bridge call: {aliceSessionId} -> {bobSessionId}");
+
+            // 建立橋接通話狀態
+            var bridgeId = Guid.NewGuid().ToString();
+            var bridgeCallState = new BridgeCallState
+            {
+                AliceSessionId = aliceSessionId,
+                BobSessionId = bobSessionId,
+                AliceAccepted = false,
+                BobAccepted = false,
+                BridgeId = bridgeId
+            };
+
+            _bridgeCallStates[bridgeId] = bridgeCallState;
+
+            // 通知 Bob 有來電
+            await NotifyBrowserClient(bobSessionId, "bridge-call", new
+            {
+                bridgeId = bridgeId,
+                targetSessionId = aliceSessionId,
+                isInitiator = false,
+                from = sipUri
+            });
+
+            // 通知 Alice 通話已發起
+            await NotifyBrowserClient(aliceSessionId, "bridge-call", new
+            {
+                bridgeId = bridgeId,
+                targetSessionId = bobSessionId,
+                isInitiator = true
+            });
+
+            _logger.LogInformation($"Bridge call {bridgeId} initiated successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error creating bridge call");
+            await NotifyBrowserClient(aliceSessionId, "call-failed", ex.Message);
+        }
     }
 }

@@ -29,7 +29,7 @@ public class CallBridge
         _bridgeId = Guid.NewGuid().ToString();
     }
 
-    public async Task<bool> CreateBridge(string aliceSessionId, string bobSessionId, SIPTransport aliceTransport, SIPTransport bobTransport)
+    public async Task<bool> EstablishBridge(string aliceSessionId, string bobSessionId, SIPTransport aliceTransport, SIPTransport bobTransport)
     {
         try
         {
