@@ -121,7 +121,7 @@
         let remoteStream = null;
         let currentCallType = 'regular'; // 'regular' or 'bridge'
         let currentBridgeId = null;
-        let isWebRTCInitialized = false; // 新增：追蹤 WebRTC 是否已初始化
+        let isWebRTCInitialized = false; // New: Track if WebRTC is initialized
         const sessionId = generateSessionId();
 
         // WebSocket connection to gateway
@@ -254,7 +254,7 @@
                     if (sessionPart.length > 10) { // Simple heuristic for session ID
                         currentCallType = 'bridge';
                         console.log('Detected bridge call to session:', sessionPart);
-                        // 橋接通話不立即初始化 WebRTC，等待 sip-call-established 訊息
+                        // Bridge call does not initialize WebRTC immediately, wait for sip-call-established message
                         console.log('Making bridge call to:', sipUri);
                         sendWebSocketMessage('make-call', sipUri);
                         return;
@@ -265,7 +265,7 @@
                     currentCallType = 'regular';
                 }
                 
-                // 只有一般通話才立即初始化 WebRTC
+                // Only initialize WebRTC for regular calls
                 await initializeWebRTC();
                 console.log('Making call to:', sipUri);
                 sendWebSocketMessage('make-call', sipUri);
@@ -460,11 +460,11 @@
             const callDetailsDiv = document.getElementById('callDetails');
             callDetailsDiv.innerHTML += `<p><strong>Status:</strong> SIP call established! Starting WebRTC connection...</p>`;
             
-            // SIP 呼叫已建立，現在可以開始 WebRTC 連接
+            // SIP call established, now start WebRTC connection
             try {
                 await initializeWebRTC();
 
-                // 建立 WebRTC offer
+                // Create WebRTC offer
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
 
@@ -492,7 +492,7 @@
 
         async function acceptBridgeCall() {
             try {
-                // 不立即初始化 WebRTC，等待 sip-call-established 訊息
+                // Do not initialize WebRTC immediately, wait for sip-call-established message
                 console.log('Accepting bridge call');
                 sendWebSocketMessage('accept-bridge-call', {
                     bridgeId: currentBridgeId
@@ -539,8 +539,8 @@
             callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Bridge established! Starting WebRTC connection...</p>`;
             console.log('Bridge established:', bridgeData.bridgeId);
 
-            // 橋接已建立，開始 WebRTC 連接
-            // 這裡不立即開始 WebRTC，而是等待 sip-call-established 訊息
+            // Bridge established, start WebRTC connection
+            // Do not start WebRTC immediately here, but wait for sip-call-established message
         }
 
         function handleBridgeFailed(bridgeData) {

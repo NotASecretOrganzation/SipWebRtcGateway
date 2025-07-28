@@ -467,13 +467,13 @@ public partial class SipWebRtcGateway
     {
         try
         {
-            // 首先檢查是否在橋接通話狀態中
+            // First check if in bridge call state
             var bridgeCallState = _bridgeCallStates.Values.FirstOrDefault(s => 
                 s.AliceSessionId == sessionId || s.BobSessionId == sessionId);
 
             if (bridgeCallState != null)
             {
-                // 更新橋接通話狀態
+                // Update bridge call state
                 if (sessionId == bridgeCallState.AliceSessionId)
                 {
                     bridgeCallState.AliceAccepted = true;
@@ -487,13 +487,13 @@ public partial class SipWebRtcGateway
                     ? bridgeCallState.BobSessionId 
                     : bridgeCallState.AliceSessionId;
 
-                // 通知另一方已接受
+                // Notify the other party that call was accepted
                 await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
                 {
                     acceptedBy = sessionId
                 });
 
-                // 如果兩方都接受了，建立橋接
+                // If both parties have accepted, establish bridge
                 if (bridgeCallState.AliceAccepted && bridgeCallState.BobAccepted)
                 {
                     await EstablishBridge(bridgeCallState);
@@ -501,24 +501,24 @@ public partial class SipWebRtcGateway
             }
             else
             {
-                // 檢查是否在已建立的橋接中
+                // Check if in established bridge
                 if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
                     _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
                 {
-                    // 使用 CallBridge 的 AcceptCall 方法
+                    // Use CallBridge's AcceptCall method
                     await bridge.AcceptCall(sessionId);
                     
                     var otherSessionId = sessionId == bridge.AliceSessionId 
                         ? bridge.BobSessionId 
                         : bridge.AliceSessionId;
 
-                    // 通知另一方已接受
+                    // Notify the other party that call was accepted
                     await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
                     {
                         acceptedBy = sessionId
                     });
 
-                    // 如果 SIP 呼叫已建立，通知客戶端可以開始 WebRTC
+                    // If SIP call is established, notify clients they can start WebRTC
                     if (bridge.SipCallEstablished)
                     {
                         await NotifyBrowserClient(bridge.AliceSessionId, "sip-call-established", new
@@ -812,14 +812,14 @@ public partial class SipWebRtcGateway
         _logger.LogInformation("SIP-WebRTC Gateway stopped");
     }
 
-    // 添加 EstablishBridge 方法
+    // Add EstablishBridge method
     private async Task EstablishBridge(BridgeCallState bridgeCallState)
     {
         try
         {
             _logger.LogInformation($"Establishing bridge for Alice ({bridgeCallState.AliceSessionId}) and Bob ({bridgeCallState.BobSessionId})");
 
-            // 通知客戶端橋接正在建立
+            // Notify clients that bridge is being established
             await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-establishing", new
             {
                 bridgeId = bridgeCallState.BridgeId,
@@ -832,7 +832,7 @@ public partial class SipWebRtcGateway
                 targetSessionId = bridgeCallState.AliceSessionId
             });
 
-            // 獲取 SIP transports
+            // Get SIP transports
             if (!_sipTransports.TryGetValue(bridgeCallState.AliceSessionId, out SIPTransport? aliceTransport) ||
                 !_sipTransports.TryGetValue(bridgeCallState.BobSessionId, out SIPTransport? bobTransport))
             {
@@ -840,7 +840,7 @@ public partial class SipWebRtcGateway
                 return;
             }
 
-            // 建立 CallBridge
+            // Create CallBridge
             var bridge = new CallBridge(_loggerFactory.CreateLogger<CallBridge>());
             var bridgeCreated = await bridge.EstablishBridge(
                 bridgeCallState.AliceSessionId, 
@@ -850,12 +850,12 @@ public partial class SipWebRtcGateway
 
             if (bridgeCreated)
             {
-                // 儲存橋接
+                // Store bridge
                 _callBridges[bridge.BridgeId] = bridge;
                 _sessionToBridge[bridgeCallState.AliceSessionId] = bridge.BridgeId;
                 _sessionToBridge[bridgeCallState.BobSessionId] = bridge.BridgeId;
 
-                // 通知客戶端橋接已建立（但還不能開始 WebRTC）
+                // Notify clients that bridge is established (but WebRTC not ready yet)
                 await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-established", new
                 {
                     bridgeId = bridge.BridgeId,
@@ -877,7 +877,7 @@ public partial class SipWebRtcGateway
                 await NotifyBrowserClient(bridgeCallState.BobSessionId, "bridge-failed", "Failed to establish bridge");
             }
 
-            // 清理橋接通話狀態
+            // Clean up bridge call state
             _bridgeCallStates.Remove(bridgeCallState.BridgeId);
         }
         catch (Exception ex)
@@ -886,14 +886,14 @@ public partial class SipWebRtcGateway
         }
     }
 
-    // 修改 HandleBridgeCall 方法（在 InitiateSipCall 中呼叫）
+    // Modify HandleBridgeCall method (called from InitiateSipCall)
     private async Task HandleBridgeCall(string aliceSessionId, string bobSessionId, string sipUri)
     {
         try
         {
             _logger.LogInformation($"Creating bridge call: {aliceSessionId} -> {bobSessionId}");
 
-            // 建立橋接通話狀態
+            // Create bridge call state
             var bridgeId = Guid.NewGuid().ToString();
             var bridgeCallState = new BridgeCallState
             {
@@ -906,7 +906,7 @@ public partial class SipWebRtcGateway
 
             _bridgeCallStates[bridgeId] = bridgeCallState;
 
-            // 通知 Bob 有來電
+            // Notify Bob about incoming call
             await NotifyBrowserClient(bobSessionId, "bridge-call", new
             {
                 bridgeId = bridgeId,
@@ -915,7 +915,7 @@ public partial class SipWebRtcGateway
                 from = sipUri
             });
 
-            // 通知 Alice 通話已發起
+            // Notify Alice about the call initiation
             await NotifyBrowserClient(aliceSessionId, "bridge-call", new
             {
                 bridgeId = bridgeId,

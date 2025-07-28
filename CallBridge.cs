@@ -69,7 +69,7 @@ public class CallBridge
             _aliceMediaSession = new VoIPMediaSession();
             _bobMediaSession = new VoIPMediaSession();
 
-            // 注意：此時不設置 RTP 轉發，等待 SIP 呼叫建立後再設置
+            // Note: Don't set up RTP bridging yet, wait until SIP call is established
             _isActive = true;
             _logger.LogInformation($"Call bridge {_bridgeId} created successfully");
 
@@ -82,7 +82,7 @@ public class CallBridge
         }
     }
 
-    // 新增：接受呼叫的方法
+    // New: Method to accept calls
     public async Task<bool> AcceptCall(string sessionId)
     {
         try
@@ -99,7 +99,7 @@ public class CallBridge
 
             _logger.LogInformation($"{(isAlice ? "Alice" : "Bob")} ({sessionId}) accepted the call in bridge {_bridgeId}");
 
-            // 如果兩方都接受了，建立 SIP 呼叫
+            // If both parties have accepted, establish SIP call
             if (_aliceAccepted && _bobAccepted && !_sipCallEstablished)
             {
                 await EstablishSipCall();
@@ -114,14 +114,14 @@ public class CallBridge
         }
     }
 
-    // 新增：建立 SIP 呼叫的方法
+    // New: Method to establish SIP call
     private async Task EstablishSipCall()
     {
         try
         {
             _logger.LogInformation($"Both parties accepted, establishing SIP call in bridge {_bridgeId}");
             
-            // 建立 Alice 到 Bob 的 SIP 呼叫
+            // Establish SIP call from Alice to Bob
             string bobSipUrl = $"sip:{_bobSessionId}@{_bobTransport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Address}:{_bobTransport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Port}";
             
             var callResult = await _aliceSip.Call(bobSipUrl, null, null, _aliceMediaSession);
@@ -131,7 +131,7 @@ public class CallBridge
                 _sipCallEstablished = true;
                 _logger.LogInformation($"SIP call successfully established in bridge {_bridgeId}");
                 
-                // SIP 呼叫建立後，設置 RTP 轉發
+                // Set up RTP bridging after SIP call is established
                 SetupRtpBridging();
             }
             else
