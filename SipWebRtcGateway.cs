@@ -1,5 +1,4 @@
-﻿using DnsClient.Internal;
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorcery.SIP;
@@ -13,26 +12,30 @@ namespace ConsoleApp1;
 
 public partial class SipWebRtcGateway
 {
-    private WebSocketServer _webSocketServer;
+    private WebSocketServer? _webSocketServer;
     private Dictionary<string, SIPTransport> _sipTransports = new();
     private Dictionary<string, RTCPeerConnection> _webRtcConnections = new();
     private Dictionary<string, SIPUserAgent> _sipCalls = new();
-    private Dictionary<string, WebSocketBehavior1> _webSocketClients = new();
+    private Dictionary<string, CustomWebSocketBehavior> _webSocketClients = new();
     private Dictionary<string, VoIPMediaSession> _mediaSessions = new();
-    private ILogger<SipWebRtcGateway> _logger;
+    private Dictionary<string, CallSession> _callSessions = new();
+    private Dictionary<string, CallBridge> _callBridges = new();
+    private Dictionary<string, string> _sessionToBridge = new(); // Maps session ID to bridge ID
+    protected ILogger<SipWebRtcGateway> _logger;
+    protected ILoggerFactory _loggerFactory;
 
-    public SipWebRtcGateway(ILogger<SipWebRtcGateway> logger)
+    public SipWebRtcGateway(ILogger<SipWebRtcGateway> logger, ILoggerFactory factory)
     {
         _logger = logger;
+        _loggerFactory = factory;
     }
 
     public async Task Start()
     {
-
         // Start WebSocket server for browser clients
         _webSocketServer = new WebSocketServer("ws://localhost:8080");
 
-        _webSocketServer.WebSocketServices.AddService<WebSocketBehavior1>("/sip", webSocketBehavior =>
+        _webSocketServer.WebSocketServices.AddService<CustomWebSocketBehavior>("/sip", webSocketBehavior =>
         {
             webSocketBehavior.HandleWebSocketMessage = HandleWebSocketMessage;
             webSocketBehavior.OnClientConnected = OnClientConnected;
@@ -43,9 +46,31 @@ public partial class SipWebRtcGateway
         _logger.LogInformation("SIP-WebRTC Gateway started on ws://localhost:8080/sip");
     }
 
-    private void OnClientConnected(string sessionId, WebSocketBehavior1 client)
+    private void OnClientConnected(string sessionId, CustomWebSocketBehavior client)
     {
         _webSocketClients[sessionId] = client;
+        
+        // Create SIP transport for this session
+        var sipTransport = CreateSipTransport(sessionId);
+        _sipTransports[sessionId] = sipTransport;
+        
+        _logger.LogInformation($"Client connected with session ID: {sessionId}, SIP transport created");
+    }
+
+    private SIPTransport CreateSipTransport(string sessionId)
+    {
+        var sipTransport = new SIPTransport();
+        IPEndPoint endpoint = new IPEndPoint(IPAddress.Any, 0);
+        sipTransport.AddSIPChannel(new SIPUDPChannel(endpoint));
+        
+        // Register SIP request handler for this transport
+        sipTransport.SIPTransportRequestReceived += async (localSIPEndPoint, remoteEndPoint, sipRequest) =>
+        {
+            await OnSipRequest(sessionId, localSIPEndPoint, remoteEndPoint, sipRequest);
+        };
+        
+        _logger.LogInformation($"Created SIP transport for session {sessionId} on port {endpoint.Port}");
+        return sipTransport;
     }
 
     private void OnClientDisconnected(string sessionId)
@@ -64,52 +89,178 @@ public partial class SipWebRtcGateway
             value2.Hangup();
             _sipCalls.Remove(sessionId);
         }
+
+        if (_sipTransports.TryGetValue(sessionId, out SIPTransport? transport))
+        {
+            transport.Shutdown();
+            _sipTransports.Remove(sessionId);
+        }
+
+        if (_callSessions.TryGetValue(sessionId, out CallSession? callSession))
+        {
+            callSession.SipUserAgent?.Hangup();
+            callSession.WebRtcPeer?.close();
+            _callSessions.Remove(sessionId);
+        }
+
+        // Clean up call bridge if this session is part of one
+        if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId))
+        {
+            if (_callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            {
+                bridge.Hangup();
+                _callBridges.Remove(bridgeId);
+            }
+            _sessionToBridge.Remove(sessionId);
+        }
+
+        _logger.LogInformation($"Client disconnected: {sessionId}, cleaned up all resources");
     }
 
-    private async Task OnSipRequest(SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint, SIPRequest sipRequest)
+    private async Task OnSipRequest(string sessionId, SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint, SIPRequest sipRequest)
     {
         if (sipRequest.Method == SIPMethodsEnum.INVITE)
         {
-            _logger.LogInformation($"Incoming SIP call from {sipRequest.Header.From.FromURI}");
+            _logger.LogInformation($"Incoming SIP call from {sipRequest.Header.From.FromURI} to session {sessionId}");
 
-            // Create WebRTC peer connection for this SIP call
-            var sessionId = Guid.NewGuid().ToString();
-            var peerConnection = await CreateWebRtcPeerConnection(sessionId);
-
-            var sipTransport = new SIPTransport();
-            IPEndPoint endpoint = new IPEndPoint(IPAddress.Any, 0);
-            sipTransport.AddSIPChannel(new SIPUDPChannel(endpoint));
-
-            _logger.LogInformation($"Port: {endpoint.Port}");
-
-            // Create SIP user agent
-            var sipUserAgent = new SIPUserAgent(sipTransport, null);
-            _sipCalls[sessionId] = sipUserAgent;
-
-            // Create media session for the call
-            var mediaSession = new VoIPMediaSession();
-
-            // Accept the SIP call
-            var uas = sipUserAgent.AcceptCall(sipRequest);
-            await sipUserAgent.Answer(uas, mediaSession);
-
-            // Set up RTP bridging from SIP to WebRTC
-            mediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
+            // Check if this is a call to another WebRTC client (Alice calling Bob)
+            var targetUri = sipRequest.Header.To.ToURI.ToString();
+            var targetSessionId = ExtractSessionIdFromUri(targetUri);
+            
+            if (!string.IsNullOrEmpty(targetSessionId) && _webSocketClients.ContainsKey(targetSessionId))
             {
-                if (_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
-                {
-                    value.SendRtpRaw(media, rtpPkt.Payload,
-                        rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
-                }
-            };
-
-            // Notify any connected browser clients about incoming call
-            await NotifyBrowserClient(sessionId, "incoming-call", new
+                // This is Alice calling Bob - create a call bridge
+                await HandleAliceToBobCall(sessionId, targetSessionId, sipRequest);
+            }
+            else
             {
-                from = sipRequest.Header.From.FromURI.ToString(),
-                sessionId = sessionId
-            });
+                // Regular SIP call to external endpoint
+                await HandleRegularSipCall(sessionId, sipRequest);
+            }
         }
+    }
+
+    private async Task HandleAliceToBobCall(string aliceSessionId, string bobSessionId, SIPRequest sipRequest)
+    {
+        try
+        {
+            _logger.LogInformation($"Creating Alice to Bob call bridge: {aliceSessionId} -> {bobSessionId}");
+
+            // Get SIP transports for both sessions
+            if (!_sipTransports.TryGetValue(aliceSessionId, out SIPTransport? aliceTransport) ||
+                !_sipTransports.TryGetValue(bobSessionId, out SIPTransport? bobTransport))
+            {
+                _logger.LogError($"Missing SIP transport for Alice ({aliceSessionId}) or Bob ({bobSessionId})");
+                return;
+            }
+
+            // Create call bridge
+            var bridge = new CallBridge(_loggerFactory.CreateLogger<CallBridge>());
+            var bridgeCreated = await bridge.CreateBridge(aliceSessionId, bobSessionId, aliceTransport, bobTransport);
+            
+            if (bridgeCreated)
+            {
+                _callBridges[bridge.BridgeId] = bridge;
+                _sessionToBridge[aliceSessionId] = bridge.BridgeId;
+                _sessionToBridge[bobSessionId] = bridge.BridgeId;
+
+                // Notify both clients about the incoming call
+                await NotifyBrowserClient(aliceSessionId, "bridge-call", new
+                {
+                    bridgeId = bridge.BridgeId,
+                    targetSessionId = bobSessionId,
+                    isInitiator = true
+                });
+
+                await NotifyBrowserClient(bobSessionId, "bridge-call", new
+                {
+                    bridgeId = bridge.BridgeId,
+                    targetSessionId = aliceSessionId,
+                    isInitiator = false,
+                    from = sipRequest.Header.From.FromURI.ToString()
+                });
+
+                _logger.LogInformation($"Alice to Bob call bridge {bridge.BridgeId} created successfully");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error creating Alice to Bob call bridge");
+        }
+    }
+
+    private async Task HandleRegularSipCall(string sessionId, SIPRequest sipRequest)
+    {
+        // Create WebRTC peer connection for this SIP call
+        var peerConnection = await CreateWebRtcPeerConnection(sessionId);
+
+        // Get the SIP transport for this session
+        if (!_sipTransports.TryGetValue(sessionId, out SIPTransport? sipTransport))
+        {
+            _logger.LogError($"No SIP transport found for session {sessionId}");
+            return;
+        }
+
+        // Create SIP user agent
+        var sipUserAgent = new SIPUserAgent(sipTransport, null);
+        _sipCalls[sessionId] = sipUserAgent;
+
+        // Create media session for the call
+        var mediaSession = new VoIPMediaSession();
+        _mediaSessions[sessionId] = mediaSession;
+
+        // Create call session to manage the connection
+        var callSession = new CallSession
+        {
+            SipTransport = sipTransport,
+            SipUserAgent = sipUserAgent,
+            WebRtcPeer = peerConnection,
+            MediaSession = mediaSession
+        };
+        _callSessions[sessionId] = callSession;
+
+        // Accept the SIP call
+        var uas = sipUserAgent.AcceptCall(sipRequest);
+        await sipUserAgent.Answer(uas, mediaSession);
+
+        // Set up RTP bridging from SIP to WebRTC
+        mediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
+        {
+            if (_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
+            {
+                value.SendRtpRaw(media, rtpPkt.Payload,
+                    rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
+            }
+        };
+
+        // Notify any connected browser clients about incoming call
+        await NotifyBrowserClient(sessionId, "incoming-call", new
+        {
+            from = sipRequest.Header.From.FromURI.ToString(),
+            sessionId = sessionId
+        });
+    }
+
+    private string? ExtractSessionIdFromUri(string uri)
+    {
+        // Extract session ID from URI like "sip:sessionId@domain.com"
+        try
+        {
+            var uriParts = uri.Split('@');
+            if (uriParts.Length > 0)
+            {
+                var userPart = uriParts[0];
+                if (userPart.StartsWith("sip:"))
+                {
+                    return userPart.Substring(4);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"Error extracting session ID from URI {uri}: {ex.Message}");
+        }
+        return null;
     }
 
     private async Task<RTCPeerConnection> CreateWebRtcPeerConnection(string sessionId)
@@ -139,13 +290,10 @@ public partial class SipWebRtcGateway
         // Bridge RTP from WebRTC to SIP
         peerConnection.OnRtpPacketReceived += (rep, media, rtpPkt) =>
         {
-            if (_sipCalls.TryGetValue(sessionId, out SIPUserAgent? value) && value.MediaSession != null)
+            if (_mediaSessions.TryGetValue(sessionId, out VoIPMediaSession? mediaSession))
             {
-                if (_sipCalls[sessionId].MediaSession is VoIPMediaSession mediaSession)
-                {
-                    mediaSession.SendRtpRaw(media, rtpPkt.Payload,
-                        rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
-                }
+                mediaSession.SendRtpRaw(media, rtpPkt.Payload,
+                    rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
             }
         };
 
@@ -185,11 +333,24 @@ public partial class SipWebRtcGateway
                 case "accept-call":
                     await HandleWebRtcOffer(sessionId, msg.Data);
                     break;
-
                 case "reject-call":
                     await HandleRejectCall(sessionId);
                     break;
-
+                case "bridge-offer":
+                    await HandleBridgeOffer(sessionId, msg.Data);
+                    break;
+                case "bridge-answer":
+                    await HandleBridgeAnswer(sessionId, msg.Data);
+                    break;
+                case "bridge-ice-candidate":
+                    await HandleBridgeIceCandidate(sessionId, msg.Data);
+                    break;
+                case "accept-bridge-call":
+                    await HandleAcceptBridgeCall(sessionId, msg.Data);
+                    break;
+                case "reject-bridge-call":
+                    await HandleRejectBridgeCall(sessionId);
+                    break;
                 default:
                     break;
             }
@@ -197,6 +358,129 @@ public partial class SipWebRtcGateway
         catch (Exception ex)
         {
             _logger.LogInformation($"Error handling WebSocket message: {ex.Message}");
+        }
+    }
+
+    private async Task HandleBridgeOffer(string sessionId, object data)
+    {
+        try
+        {
+            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
+                _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            {
+                var offerJson = JsonSerializer.Serialize(data);
+                var offer = JsonSerializer.Deserialize<RTCSessionDescriptionInit>(offerJson);
+                
+                // Determine if this is Alice or Bob based on the bridge
+                bool isAlice = bridge.AliceWebRtc != null && bridge.BobWebRtc != null;
+                await bridge.HandleWebRtcOffer(sessionId, offer, isAlice);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error handling bridge offer for session {sessionId}");
+        }
+    }
+
+    private async Task HandleBridgeAnswer(string sessionId, object data)
+    {
+        try
+        {
+            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
+                _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            {
+                var answerJson = JsonSerializer.Serialize(data);
+                var answer = JsonSerializer.Deserialize<RTCSessionDescriptionInit>(answerJson);
+                
+                bool isAlice = bridge.AliceWebRtc != null && bridge.BobWebRtc != null;
+                await bridge.HandleWebRtcAnswer(sessionId, answer, isAlice);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error handling bridge answer for session {sessionId}");
+        }
+    }
+
+    private async Task HandleBridgeIceCandidate(string sessionId, object data)
+    {
+        try
+        {
+            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
+                _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            {
+                var candidateJson = JsonSerializer.Serialize(data);
+                var candidate = JsonSerializer.Deserialize<RTCIceCandidateInit>(candidateJson);
+                
+                bool isAlice = bridge.AliceWebRtc != null && bridge.BobWebRtc != null;
+                await bridge.HandleIceCandidate(sessionId, candidate, isAlice);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error handling bridge ICE candidate for session {sessionId}");
+        }
+    }
+
+    private async Task HandleAcceptBridgeCall(string sessionId, object data)
+    {
+        try
+        {
+            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
+                _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            {
+                // The call bridge is already created, just notify the other party
+                var bridgeInfo = JsonSerializer.Deserialize<BridgeCallInfo>(JsonSerializer.Serialize(data));
+                
+                // Find the other session in this bridge
+                var otherSessionId = _sessionToBridge.FirstOrDefault(x => x.Value == bridgeId && x.Key != sessionId).Key;
+                if (!string.IsNullOrEmpty(otherSessionId))
+                {
+                    await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
+                    {
+                        bridgeId = bridgeId,
+                        acceptedBy = sessionId
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error handling bridge call acceptance for session {sessionId}");
+        }
+    }
+
+    private async Task HandleRejectBridgeCall(string sessionId)
+    {
+        try
+        {
+            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
+                _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+            {
+                // Find the other session in this bridge
+                var otherSessionId = _sessionToBridge.FirstOrDefault(x => x.Value == bridgeId && x.Key != sessionId).Key;
+                if (!string.IsNullOrEmpty(otherSessionId))
+                {
+                    await NotifyBrowserClient(otherSessionId, "bridge-rejected", new
+                    {
+                        bridgeId = bridgeId,
+                        rejectedBy = sessionId
+                    });
+                }
+
+                // Clean up the bridge
+                bridge.Hangup();
+                _callBridges.Remove(bridgeId);
+                _sessionToBridge.Remove(sessionId);
+                if (!string.IsNullOrEmpty(otherSessionId))
+                {
+                    _sessionToBridge.Remove(otherSessionId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error handling bridge call rejection for session {sessionId}");
         }
     }
 
@@ -209,7 +493,6 @@ public partial class SipWebRtcGateway
 
             if (_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? peerConnection))
             {
-
                 // Set remote description (offer from browser)
                 peerConnection.setRemoteDescription(offer);
 
@@ -287,6 +570,25 @@ public partial class SipWebRtcGateway
                 _sipCalls.Remove(sessionId);
             }
 
+            // Clean up call session
+            if (_callSessions.TryGetValue(sessionId, out CallSession? callSession))
+            {
+                callSession.SipUserAgent?.Hangup();
+                callSession.WebRtcPeer?.close();
+                _callSessions.Remove(sessionId);
+            }
+
+            // Clean up call bridge if this session is part of one
+            if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId))
+            {
+                if (_callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
+                {
+                    bridge.Hangup();
+                    _callBridges.Remove(bridgeId);
+                }
+                _sessionToBridge.Remove(sessionId);
+            }
+
             _logger.LogInformation($"Hung up call for session {sessionId}");
         }
         catch (Exception ex)
@@ -301,7 +603,15 @@ public partial class SipWebRtcGateway
         {
             _logger.LogInformation($"Initiating SIP call to {sipUri} for session {sessionId}");
 
-            var sipUserAgent = new SIPUserAgent(_sipTransport, null);
+            // Get the SIP transport for this session
+            if (!_sipTransports.TryGetValue(sessionId, out SIPTransport? sipTransport))
+            {
+                _logger.LogError($"No SIP transport found for session {sessionId}");
+                await NotifyBrowserClient(sessionId, "call-failed", "No SIP transport available");
+                return;
+            }
+
+            var sipUserAgent = new SIPUserAgent(sipTransport, null);
             _sipCalls[sessionId] = sipUserAgent;
 
             // Create or get existing WebRTC peer connection
@@ -324,6 +634,17 @@ public partial class SipWebRtcGateway
 
             // Create media session
             var mediaSession = new VoIPMediaSession();
+            _mediaSessions[sessionId] = mediaSession;
+
+            // Create call session
+            var callSession = new CallSession
+            {
+                SipTransport = sipTransport,
+                SipUserAgent = sipUserAgent,
+                WebRtcPeer = peerConnection,
+                MediaSession = mediaSession
+            };
+            _callSessions[sessionId] = callSession;
 
             // Set up RTP bridging from SIP to WebRTC
             mediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
@@ -369,6 +690,13 @@ public partial class SipWebRtcGateway
             _webRtcConnections.Remove(sessionId);
         }
 
+        if (_callSessions.TryGetValue(sessionId, out CallSession? callSession))
+        {
+            callSession.SipUserAgent?.Hangup();
+            callSession.WebRtcPeer?.close();
+            _callSessions.Remove(sessionId);
+        }
+
         _logger.LogInformation($"Call from SIP rejected by browser, session {sessionId}");
     }
 
@@ -376,7 +704,7 @@ public partial class SipWebRtcGateway
     {
         try
         {
-            if (_webSocketClients.TryGetValue(sessionId, out WebSocketBehavior1? value))
+            if (_webSocketClients.TryGetValue(sessionId, out CustomWebSocketBehavior? value))
             {
                 var message = new WebSocketMessage
                 {
@@ -423,6 +751,26 @@ public partial class SipWebRtcGateway
             call.Hangup();
         }
         _sipCalls.Clear();
+
+        foreach (var transport in _sipTransports.Values)
+        {
+            transport.Shutdown();
+        }
+        _sipTransports.Clear();
+
+        foreach (var callSession in _callSessions.Values)
+        {
+            callSession.SipUserAgent?.Hangup();
+            callSession.WebRtcPeer?.close();
+        }
+        _callSessions.Clear();
+
+        foreach (var bridge in _callBridges.Values)
+        {
+            bridge.Hangup();
+        }
+        _callBridges.Clear();
+        _sessionToBridge.Clear();
 
         _logger.LogInformation("SIP-WebRTC Gateway stopped");
     }

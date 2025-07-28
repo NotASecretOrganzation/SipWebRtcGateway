@@ -4,12 +4,12 @@ using WebSocketSharp.Server;
 
 namespace ConsoleApp1
 {
-    public class WebSocketBehavior1 : WebSocketBehavior
+    public class CustomWebSocketBehavior : WebSocketBehavior
     {
-        public Action<string, string> HandleWebSocketMessage { get; set; }
-        public Action<string, WebSocketBehavior1> OnClientConnected { get; set; }
-        public Action<string> OnClientDisconnected { get; set; }
-        public string SessionId { get; private set; }
+        public Action<string, string>? HandleWebSocketMessage { get; set; }
+        public Action<string, CustomWebSocketBehavior>? OnClientConnected { get; set; }
+        public Action<string>? OnClientDisconnected { get; set; }
+        public string SessionId { get; protected set; } = string.Empty;
 
         protected override void OnOpen()
         {

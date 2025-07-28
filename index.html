@@ -57,13 +57,28 @@
             .media-options label {
                 margin-right: 15px;
             }
+
+        .call-info {
+            background-color: #f0f0f0;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+
+        .bridge-controls {
+            margin: 10px 0;
+        }
+
+        .bridge-controls button {
+            margin-right: 10px;
+        }
     </style>
 </head>
 <body>
     <h1>SIP-WebRTC Gateway with Video Support</h1>
 
     <div class="controls">
-        <input type="text" id="sipUri" placeholder="sip:user@domain.com" />
+        <input type="text" id="sipUri" placeholder="sip:user@domain.com or sip:sessionId@domain.com" />
         <button onclick="makeCall()">Make Call</button>
         <button onclick="hangUp()">Hang Up</button>
     </div>
@@ -75,6 +90,15 @@
         <label>
             <input type="checkbox" id="enableAudio" checked> Enable Audio
         </label>
+    </div>
+
+    <div id="callInfo" class="call-info" style="display: none;">
+        <h3>Call Information</h3>
+        <div id="callDetails"></div>
+        <div id="bridgeControls" class="bridge-controls" style="display: none;">
+            <button onclick="acceptBridgeCall()">Accept Call</button>
+            <button onclick="rejectBridgeCall()">Reject Call</button>
+        </div>
     </div>
 
     <div class="video-container">
@@ -94,6 +118,8 @@
         let ws;
         let peerConnection;
         let localStream;
+        let currentBridgeId = null;
+        let currentCallType = null; // 'regular' or 'bridge'
         const sessionId = generateSessionId();
 
         // WebSocket connection to gateway
@@ -182,7 +208,11 @@
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate) {
                         console.log('Sending ICE candidate');
-                        sendWebSocketMessage('ice-candidate', event.candidate);
+                        if (currentCallType === 'bridge') {
+                            sendWebSocketMessage('bridge-ice-candidate', event.candidate);
+                        } else {
+                            sendWebSocketMessage('ice-candidate', event.candidate);
+                        }
                     }
                 };
 
@@ -212,6 +242,21 @@
             try {
                 await initializeWebRTC();
                 console.log('Making call to:', sipUri);
+                
+                // Check if this is a bridge call (to another session)
+                if (sipUri.includes('@') && sipUri.split('@')[0].startsWith('sip:')) {
+                    const sessionPart = sipUri.split('@')[0].substring(4);
+                    // If it looks like a session ID, treat it as a bridge call
+                    if (sessionPart.length > 10) { // Simple heuristic for session ID
+                        currentCallType = 'bridge';
+                        console.log('Detected bridge call to session:', sessionPart);
+                    } else {
+                        currentCallType = 'regular';
+                    }
+                } else {
+                    currentCallType = 'regular';
+                }
+                
                 sendWebSocketMessage('make-call', sipUri);
             } catch (error) {
                 console.error('Error making call:', error);
@@ -236,6 +281,24 @@
                         break;
                     case 'incoming-call':
                         await handleIncomingCall(message.data);
+                        break;
+                    case 'bridge-call':
+                        await handleBridgeCall(message.data);
+                        break;
+                    case 'bridge-offer':
+                        await handleBridgeOffer(message.data);
+                        break;
+                    case 'bridge-answer':
+                        await handleBridgeAnswer(message.data);
+                        break;
+                    case 'bridge-ice-candidate':
+                        await handleBridgeIceCandidate(message.data);
+                        break;
+                    case 'bridge-accepted':
+                        handleBridgeAccepted(message.data);
+                        break;
+                    case 'bridge-rejected':
+                        handleBridgeRejected(message.data);
                         break;
                     case 'call-ended':
                         handleCallEnded();
@@ -302,6 +365,114 @@
             }
         }
 
+        async function handleBridgeCall(bridgeData) {
+            currentCallType = 'bridge';
+            currentBridgeId = bridgeData.bridgeId;
+            
+            const callInfoDiv = document.getElementById('callInfo');
+            const callDetailsDiv = document.getElementById('callDetails');
+            const bridgeControlsDiv = document.getElementById('bridgeControls');
+            
+            if (bridgeData.isInitiator) {
+                callDetailsDiv.innerHTML = `
+                    <p><strong>Bridge ID:</strong> ${bridgeData.bridgeId}</p>
+                    <p><strong>Target Session:</strong> ${bridgeData.targetSessionId}</p>
+                    <p><strong>Status:</strong> Initiating call...</p>
+                `;
+                bridgeControlsDiv.style.display = 'none';
+            } else {
+                callDetailsDiv.innerHTML = `
+                    <p><strong>Bridge ID:</strong> ${bridgeData.bridgeId}</p>
+                    <p><strong>From:</strong> ${bridgeData.from}</p>
+                    <p><strong>Target Session:</strong> ${bridgeData.targetSessionId}</p>
+                    <p><strong>Status:</strong> Incoming bridge call</p>
+                `;
+                bridgeControlsDiv.style.display = 'block';
+            }
+            
+            callInfoDiv.style.display = 'block';
+        }
+
+        async function handleBridgeOffer(offer) {
+            try {
+                await initializeWebRTC();
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                console.log('Sending bridge answer');
+                sendWebSocketMessage('bridge-answer', answer);
+            } catch (error) {
+                console.error('Error handling bridge offer:', error);
+            }
+        }
+
+        async function handleBridgeAnswer(answer) {
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                console.log('Bridge answer set successfully');
+            } catch (error) {
+                console.error('Error handling bridge answer:', error);
+            }
+        }
+
+        async function handleBridgeIceCandidate(candidate) {
+            try {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                console.log('Bridge ICE candidate added successfully');
+            } catch (error) {
+                console.error('Error handling bridge ICE candidate:', error);
+            }
+        }
+
+        function handleBridgeAccepted(data) {
+            const callDetailsDiv = document.getElementById('callDetails');
+            callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Call accepted by ${data.acceptedBy}</p>`;
+            console.log('Bridge call accepted');
+        }
+
+        function handleBridgeRejected(data) {
+            const callDetailsDiv = document.getElementById('callDetails');
+            callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Call rejected by ${data.rejectedBy}</p>`;
+            console.log('Bridge call rejected');
+            setTimeout(() => {
+                cleanupCall();
+            }, 3000);
+        }
+
+        async function acceptBridgeCall() {
+            try {
+                await initializeWebRTC();
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                console.log('Accepting bridge call, sending offer');
+                sendWebSocketMessage('accept-bridge-call', {
+                    bridgeId: currentBridgeId,
+                    offer: offer
+                });
+                
+                const bridgeControlsDiv = document.getElementById('bridgeControls');
+                bridgeControlsDiv.style.display = 'none';
+                
+                const callDetailsDiv = document.getElementById('callDetails');
+                callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Call accepted</p>`;
+            } catch (error) {
+                console.error('Error accepting bridge call:', error);
+                sendWebSocketMessage('reject-bridge-call', null);
+            }
+        }
+
+        function rejectBridgeCall() {
+            console.log('Rejecting bridge call');
+            sendWebSocketMessage('reject-bridge-call', null);
+            
+            const callInfoDiv = document.getElementById('callInfo');
+            callInfoDiv.style.display = 'none';
+        }
+
         function handleCallEnded() {
             console.log('Call ended by remote party');
             cleanupCall();
@@ -360,6 +531,14 @@
             localAudio.style.display = 'none';
             remoteVideo.style.display = 'none';
             remoteAudio.style.display = 'none';
+
+            // Clear call info
+            const callInfoDiv = document.getElementById('callInfo');
+            callInfoDiv.style.display = 'none';
+
+            // Reset call state
+            currentBridgeId = null;
+            currentCallType = null;
         }
 
         // Handle page unload
