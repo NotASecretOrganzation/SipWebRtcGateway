@@ -18,6 +18,8 @@ public class CallBridge
     private VoIPMediaSession _aliceMediaSession;
     private VoIPMediaSession _bobMediaSession;
     private bool _isActive;
+    private string _aliceSessionId;
+    private string _bobSessionId;
 
     public CallBridge(ILogger<CallBridge> logger)
     {
@@ -29,6 +31,9 @@ public class CallBridge
     {
         try
         {
+            _aliceSessionId = aliceSessionId;
+            _bobSessionId = bobSessionId;
+            
             _logger.LogInformation($"Creating call bridge {_bridgeId} between Alice ({aliceSessionId}) and Bob ({bobSessionId})");
 
             // Create WebRTC connections for both parties
@@ -131,31 +136,23 @@ public class CallBridge
         _logger.LogInformation($"RTP bridging set up for bridge {_bridgeId}");
     }
 
-    public async Task<bool> InitiateCall(string aliceUri, string bobUri)
+    public async Task<bool> InitiateCall(SIPUserAgent sIPUserAgent, VoIPMediaSession voIPMediaSession, string sipUrl)
     {
         try
         {
-            _logger.LogInformation($"Initiating call from {aliceUri} to {bobUri} via bridge {_bridgeId}");
-
-            // Create WebRTC offers for both parties
-            var aliceOffer = _aliceWebRtc.createOffer();
-            await _aliceWebRtc.setLocalDescription(aliceOffer);
-
-            var bobOffer = _bobWebRtc.createOffer();
-            await _bobWebRtc.setLocalDescription(bobOffer);
+            _logger.LogInformation($"Initiating call from {sIPUserAgent}");
 
             // Initiate SIP calls
-            var aliceCallResult = await _aliceSip.Call(aliceUri, null, null, _aliceMediaSession);
-            var bobCallResult = await _bobSip.Call(bobUri, null, null, _bobMediaSession);
+            var callResult = await sIPUserAgent.Call(sipUrl, null, null, voIPMediaSession);
 
-            if (aliceCallResult && bobCallResult)
+            if (callResult)
             {
                 _logger.LogInformation($"Successfully initiated calls via bridge {_bridgeId}");
                 return true;
             }
             else
             {
-                _logger.LogWarning($"Failed to initiate calls via bridge {_bridgeId}. Alice: {aliceCallResult}, Bob: {bobCallResult}");
+                _logger.LogWarning($"Failed to initiate calls via bridge {_bridgeId}.");
                 return false;
             }
         }
@@ -245,4 +242,6 @@ public class CallBridge
     public bool IsActive => _isActive;
     public RTCPeerConnection AliceWebRtc => _aliceWebRtc;
     public RTCPeerConnection BobWebRtc => _bobWebRtc;
+    public string AliceSessionId => _aliceSessionId;
+    public string BobSessionId => _bobSessionId;
 } 

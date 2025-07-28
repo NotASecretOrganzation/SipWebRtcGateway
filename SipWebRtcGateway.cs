@@ -132,11 +132,6 @@ public partial class SipWebRtcGateway
                 // This is Alice calling Bob - create a call bridge
                 await HandleAliceToBobCall(sessionId, targetSessionId, sipRequest);
             }
-            else
-            {
-                // Regular SIP call to external endpoint
-                await HandleRegularSipCall(sessionId, sipRequest);
-            }
         }
     }
 
@@ -189,58 +184,6 @@ public partial class SipWebRtcGateway
         }
     }
 
-    private async Task HandleRegularSipCall(string sessionId, SIPRequest sipRequest)
-    {
-        // Create WebRTC peer connection for this SIP call
-        var peerConnection = await CreateWebRtcPeerConnection(sessionId);
-
-        // Get the SIP transport for this session
-        if (!_sipTransports.TryGetValue(sessionId, out SIPTransport? sipTransport))
-        {
-            _logger.LogError($"No SIP transport found for session {sessionId}");
-            return;
-        }
-
-        // Create SIP user agent
-        var sipUserAgent = new SIPUserAgent(sipTransport, null);
-        _sipCalls[sessionId] = sipUserAgent;
-
-        // Create media session for the call
-        var mediaSession = new VoIPMediaSession();
-        _mediaSessions[sessionId] = mediaSession;
-
-        // Create call session to manage the connection
-        var callSession = new CallSession
-        {
-            SipTransport = sipTransport,
-            SipUserAgent = sipUserAgent,
-            WebRtcPeer = peerConnection,
-            MediaSession = mediaSession
-        };
-        _callSessions[sessionId] = callSession;
-
-        // Accept the SIP call
-        var uas = sipUserAgent.AcceptCall(sipRequest);
-        await sipUserAgent.Answer(uas, mediaSession);
-
-        // Set up RTP bridging from SIP to WebRTC
-        mediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
-        {
-            if (_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
-            {
-                value.SendRtpRaw(media, rtpPkt.Payload,
-                    rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
-            }
-        };
-
-        // Notify any connected browser clients about incoming call
-        await NotifyBrowserClient(sessionId, "incoming-call", new
-        {
-            from = sipRequest.Header.From.FromURI.ToString(),
-            sessionId = sessionId
-        });
-    }
-
     private string? ExtractSessionIdFromUri(string uri)
     {
         // Extract session ID from URI like "sip:sessionId@domain.com"
@@ -252,7 +195,7 @@ public partial class SipWebRtcGateway
                 var userPart = uriParts[0];
                 if (userPart.StartsWith("sip:"))
                 {
-                    return userPart.Substring(4);
+                    return userPart[4..];
                 }
             }
         }
@@ -371,8 +314,8 @@ public partial class SipWebRtcGateway
                 var offerJson = JsonSerializer.Serialize(data);
                 var offer = JsonSerializer.Deserialize<RTCSessionDescriptionInit>(offerJson);
                 
-                // Determine if this is Alice or Bob based on the bridge
-                bool isAlice = bridge.AliceWebRtc != null && bridge.BobWebRtc != null;
+                // Determine if this is Alice or Bob based on the session ID
+                bool isAlice = sessionId == bridge.AliceSessionId;
                 await bridge.HandleWebRtcOffer(sessionId, offer, isAlice);
             }
         }
@@ -392,7 +335,7 @@ public partial class SipWebRtcGateway
                 var answerJson = JsonSerializer.Serialize(data);
                 var answer = JsonSerializer.Deserialize<RTCSessionDescriptionInit>(answerJson);
                 
-                bool isAlice = bridge.AliceWebRtc != null && bridge.BobWebRtc != null;
+                bool isAlice = sessionId == bridge.AliceSessionId;
                 await bridge.HandleWebRtcAnswer(sessionId, answer, isAlice);
             }
         }
@@ -412,7 +355,7 @@ public partial class SipWebRtcGateway
                 var candidateJson = JsonSerializer.Serialize(data);
                 var candidate = JsonSerializer.Deserialize<RTCIceCandidateInit>(candidateJson);
                 
-                bool isAlice = bridge.AliceWebRtc != null && bridge.BobWebRtc != null;
+                bool isAlice = sessionId == bridge.AliceSessionId;
                 await bridge.HandleIceCandidate(sessionId, candidate, isAlice);
             }
         }
