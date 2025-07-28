@@ -116,10 +116,12 @@
 
     <script>
         let ws;
-        let peerConnection;
-        let localStream;
+        let peerConnection = null;
+        let localStream = null;
+        let remoteStream = null;
+        let currentCallType = 'regular'; // 'regular' or 'bridge'
         let currentBridgeId = null;
-        let currentCallType = null; // 'regular' or 'bridge'
+        let isWebRTCInitialized = false; // 新增：追蹤 WebRTC 是否已初始化
         const sessionId = generateSessionId();
 
         // WebSocket connection to gateway
@@ -140,6 +142,10 @@
         };
 
         async function initializeWebRTC() {
+            if (isWebRTCInitialized) {
+                console.log('WebRTC already initialized, skipping.');
+                return;
+            }
             try {
                 peerConnection = new RTCPeerConnection(rtcConfig);
 
@@ -226,6 +232,7 @@
                     console.log('ICE connection state:', peerConnection.iceConnectionState);
                 };
 
+                isWebRTCInitialized = true;
             } catch (error) {
                 console.error('Error initializing WebRTC:', error);
                 alert('Error accessing media devices: ' + error.message);
@@ -240,9 +247,6 @@
             }
 
             try {
-                await initializeWebRTC();
-                console.log('Making call to:', sipUri);
-                
                 // Check if this is a bridge call (to another session)
                 if (sipUri.includes('@') && sipUri.split('@')[0].startsWith('sip:')) {
                     const sessionPart = sipUri.split('@')[0].substring(4);
@@ -250,6 +254,10 @@
                     if (sessionPart.length > 10) { // Simple heuristic for session ID
                         currentCallType = 'bridge';
                         console.log('Detected bridge call to session:', sessionPart);
+                        // 橋接通話不立即初始化 WebRTC，等待 sip-call-established 訊息
+                        console.log('Making bridge call to:', sipUri);
+                        sendWebSocketMessage('make-call', sipUri);
+                        return;
                     } else {
                         currentCallType = 'regular';
                     }
@@ -257,6 +265,9 @@
                     currentCallType = 'regular';
                 }
                 
+                // 只有一般通話才立即初始化 WebRTC
+                await initializeWebRTC();
+                console.log('Making call to:', sipUri);
                 sendWebSocketMessage('make-call', sipUri);
             } catch (error) {
                 console.error('Error making call:', error);
@@ -481,22 +492,17 @@
 
         async function acceptBridgeCall() {
             try {
-                await initializeWebRTC();
-
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-
-                console.log('Accepting bridge call, sending offer');
+                // 不立即初始化 WebRTC，等待 sip-call-established 訊息
+                console.log('Accepting bridge call');
                 sendWebSocketMessage('accept-bridge-call', {
-                    bridgeId: currentBridgeId,
-                    offer: offer
+                    bridgeId: currentBridgeId
                 });
                 
                 const bridgeControlsDiv = document.getElementById('bridgeControls');
                 bridgeControlsDiv.style.display = 'none';
                 
                 const callDetailsDiv = document.getElementById('callDetails');
-                callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Call accepted</p>`;
+                callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Call accepted, waiting for SIP call establishment...</p>`;
             } catch (error) {
                 console.error('Error accepting bridge call:', error);
                 sendWebSocketMessage('reject-bridge-call', null);
@@ -608,6 +614,7 @@
             // Reset call state
             currentBridgeId = null;
             currentCallType = null;
+            isWebRTCInitialized = false; // Reset initialized flag
         }
 
         // Handle page unload
