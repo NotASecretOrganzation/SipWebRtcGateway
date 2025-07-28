@@ -46,7 +46,18 @@ public class CallBridge
 
             // Create SIP user agents
             _aliceSip = new SIPUserAgent(aliceTransport, null);
+            _aliceSip.OnIncomingCall += (ua, req) =>
+            {
+                _logger.LogInformation($"Incoming call for Alice ({aliceSessionId}) in bridge {_bridgeId}");
+                // Handle incoming call logic here
+            };
+
             _bobSip = new SIPUserAgent(bobTransport, null);
+            _bobSip.OnIncomingCall += (ua, req) =>
+            {
+                _logger.LogInformation($"Incoming call for Bob ({bobSessionId}) in bridge {_bridgeId}");
+                // Handle incoming call logic here
+            };
 
             // Create media sessions
             _aliceMediaSession = new VoIPMediaSession();
@@ -84,7 +95,17 @@ public class CallBridge
         {
             new SDPAudioVideoMediaFormat(SDPWellKnownMediaFormatsEnum.PCMU)
         });
+
         peerConnection.addTrack(audioTrack);
+
+        var videoTrack = new MediaStreamTrack(SDPMediaTypesEnum.video, false, new List<SDPAudioVideoMediaFormat>
+        {
+            new SDPAudioVideoMediaFormat(SDPWellKnownMediaFormatsEnum.H263)
+        });
+
+
+
+        peerConnection.addTrack(videoTrack);
 
         // Handle connection state changes
         peerConnection.onconnectionstatechange += (state) =>

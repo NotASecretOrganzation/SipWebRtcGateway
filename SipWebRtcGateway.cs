@@ -167,7 +167,7 @@ public partial class SipWebRtcGateway
 
                 _logger.LogInformation($"Alice to Bob call bridge {bridge.BridgeId} created successfully");
 
-                bridge.InitiateCall();
+                //await bridge.InitiateCall();
             }
         }
         catch (Exception ex)
