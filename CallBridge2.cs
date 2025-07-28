@@ -12,87 +12,42 @@ public class CallBridge2
     protected readonly ILogger<CallBridge> _logger;
     protected readonly string _bridgeId;
     protected SIPTransport _aliceTransport;
-    protected RTCPeerConnection _aliceWebRtc;
-    protected SIPUserAgent _aliceSip;
-    protected VoIPMediaSession _aliceMediaSession;
-    protected bool _isActive;
+    protected RTCPeerConnection _aliceWebCallRtc;
+    protected RTCPeerConnection _aliceWebAnswerCallRtc;
+    protected SIPUserAgent _aliceCallAgent;
+    protected SIPUserAgent _aliceAnswerCallAgent;
+    protected VoIPMediaSession _aliceCallMediaSession;
+    protected VoIPMediaSession _aliceAnswerCallMediaSession;
     protected string _aliceSessionId;
-    protected string _bobSessionId;
     protected bool _aliceAccepted;
-    protected bool _bobAccepted;
     protected bool _sipCallEstablished;
 
-    public CallBridge2(ILogger<CallBridge> logger)
+    public CallBridge2(ILogger<CallBridge> logger, string aliceSessionId, SIPTransport aliceTransport)
     {
         _logger = logger;
         _bridgeId = Guid.NewGuid().ToString();
-        _aliceAccepted = false;
-        _bobAccepted = false;
-        _sipCallEstablished = false;
-    }
-
-    public async Task<bool> EstablishBridge(string aliceSessionId, string bobSessionId, SIPTransport aliceTransport, SIPTransport bobTransport)
-    {
-        try
+        _aliceSessionId = aliceSessionId;
+        _aliceTransport = aliceTransport;
+        _aliceAnswerCallAgent = new SIPUserAgent(aliceTransport, null);
+        _aliceAnswerCallAgent.OnIncomingCall += async (ua, req) =>
         {
-            _aliceTransport = aliceTransport;
-            _aliceSessionId = aliceSessionId;
-            _bobSessionId = bobSessionId;
-
-            _logger.LogInformation($"Creating call bridge {_bridgeId} between Alice ({aliceSessionId}) and Bob ({bobSessionId})");
-
-            // Create WebRTC connections for both parties
-            _aliceWebRtc = await CreateWebRtcPeerConnection(aliceSessionId);
-
-            // Create SIP user agents
-            _aliceSip = new SIPUserAgent(aliceTransport, null);
-            _aliceSip.OnIncomingCall += (ua, req) =>
+            _aliceAnswerCallMediaSession = new VoIPMediaSession();
+            _aliceWebAnswerCallRtc = await CreateWebRtcPeerConnection(aliceSessionId);
+            _aliceAnswerCallMediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
             {
-                _logger.LogInformation($"Incoming call for Alice ({aliceSessionId}) in bridge {_bridgeId}");
-                // Handle incoming call logic here
+                _aliceWebAnswerCallRtc.SendRtpRaw(media, rtpPkt.Payload,
+                       rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
             };
-
-            // Create media sessions
-            _aliceMediaSession = new VoIPMediaSession();
-
-            // Note: Don't set up RTP bridging yet, wait until SIP call is established
-            _isActive = true;
-            _logger.LogInformation($"Call bridge {_bridgeId} created successfully");
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Failed to create call bridge {_bridgeId}");
-            return false;
-        }
-    }
-
-    // New: Method to accept calls
-    public async Task<bool> AcceptCall(string sessionId)
-    {
-        try
-        {
-            bool isAlice = sessionId == _aliceSessionId;
-            if (isAlice)
+            _aliceWebAnswerCallRtc.OnRtpPacketReceived += (rep, media, rtpPkt) =>
             {
-                _aliceAccepted = true;
-            }
-            else
-            {
-                _bobAccepted = true;
-            }
-
-            _logger.LogInformation($"{(isAlice ? "Alice" : "Bob")} ({sessionId}) accepted the call in bridge {_bridgeId}");
-
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Error accepting call for session {sessionId}");
-            return false;
-        }
+                _aliceAnswerCallMediaSession.SendRtpRaw(media, rtpPkt.Payload,
+                       rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
+            };
+            _logger.LogInformation($"Incoming call for Alice ({aliceSessionId}) in bridge {_bridgeId}");
+            SIPServerUserAgent? useragent = ua.AcceptCall(req);
+            await _aliceCallAgent.Answer(useragent, _aliceAnswerCallMediaSession);
+            await _aliceAnswerCallMediaSession.Start();
+        };
     }
 
     // New: Method to establish SIP call
@@ -100,10 +55,25 @@ public class CallBridge2
     {
         try
         {
-            _logger.LogInformation($"Both parties accepted, establishing SIP call in bridge {_bridgeId}");
+            _logger.LogInformation($"Creating call bridge {_bridgeId} for Alice ({_aliceSessionId})");
 
-            SetupRtpBridging();
-            var callResult = await _aliceSip.Call(sipUrl, null, null, _aliceMediaSession);
+            // Create SIP user agents
+            _aliceCallAgent = new SIPUserAgent(_aliceTransport, null);
+
+            // Create media sessions
+            _aliceCallMediaSession = new VoIPMediaSession();
+            _aliceWebCallRtc = await CreateWebRtcPeerConnection(_aliceSessionId);
+            _aliceCallMediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
+            {
+                _aliceWebAnswerCallRtc.SendRtpRaw(media, rtpPkt.Payload,
+                       rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
+            };
+            _aliceWebCallRtc.OnRtpPacketReceived += (rep, media, rtpPkt) =>
+            {
+                _aliceCallMediaSession.SendRtpRaw(media, rtpPkt.Payload,
+                       rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
+            };
+            var callResult = await _aliceCallAgent.Call(sipUrl, null, null, _aliceCallMediaSession);
 
             if (callResult)
             {
@@ -161,42 +131,10 @@ public class CallBridge2
         return peerConnection;
     }
 
-    private void SetupRtpBridging()
-    {
-        // Bridge RTP from Alice's WebRTC to Bob's SIP
-        _aliceWebRtc.OnRtpPacketReceived += (rep, media, rtpPkt) =>
-        {
-            if (_isActive && _aliceMediaSession != null)
-            {
-                _aliceMediaSession.SendRtpRaw(media, rtpPkt.Payload,
-                    rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
-            }
-        };
-
-        
-        // Bridge RTP from Alice's SIP to Bob's WebRTC
-        _aliceMediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
-        {
-            if (_isActive && _aliceWebRtc != null)
-            {
-                _aliceWebRtc.SendRtpRaw(media, rtpPkt.Payload,
-                    rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
-            }
-        };
-        
-    }
-
-    protected string TransportToSipUrl(string sessionId, SIPTransport transport)
-    {
-        // Convert transport to SIP URL format
-        return $"sip:{sessionId}@{transport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Address}:{transport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Port}";
-    }
-    public async Task HandleWebRtcOffer(string sessionId, RTCSessionDescriptionInit offer)
+    public async Task HandleWebRtcOffer(RTCPeerConnection peerConnection, string sessionId, RTCSessionDescriptionInit offer)
     {
         try
         {
-            var peerConnection = _aliceWebRtc;
-
             if (peerConnection != null)
             {
                 peerConnection.setRemoteDescription(offer);
@@ -212,12 +150,10 @@ public class CallBridge2
         }
     }
 
-    public async Task HandleWebRtcAnswer(string sessionId, RTCSessionDescriptionInit answer)
+    public async Task HandleWebRtcAnswer(RTCPeerConnection peerConnection, string sessionId, RTCSessionDescriptionInit answer)
     {
         try
         {
-            var peerConnection = _aliceWebRtc;
-
             if (peerConnection != null)
             {
                 peerConnection.setRemoteDescription(answer);
@@ -230,13 +166,13 @@ public class CallBridge2
         }
     }
 
-    public async Task HandleIceCandidate(string sessionId, RTCIceCandidateInit candidate)
+    public async Task HandleIceCandidate(RTCPeerConnection peerConnection, string sessionId, RTCIceCandidateInit candidate)
     {
         try
         {
-            if (_aliceWebRtc != null)
+            if (peerConnection != null)
             {
-                _aliceWebRtc.addIceCandidate(candidate);
+                peerConnection.addIceCandidate(candidate);
                 _logger.LogInformation($"Added ICE candidate in bridge {_bridgeId}");
             }
         }
@@ -246,28 +182,25 @@ public class CallBridge2
         }
     }
 
-    public void Hangup()
+    public void HangupCall()
     {
-        _isActive = false;
+        _aliceCallAgent?.Hangup();
 
-        _aliceSip?.Hangup();
+        _aliceWebCallRtc?.close();
+    }
 
-        _aliceWebRtc?.close();
+    public void HangupAnserCall()
+    {
+
+        _aliceAnswerCallAgent?.Hangup();
+
+        _aliceWebAnswerCallRtc?.close();
 
         _logger.LogInformation($"Call bridge {_bridgeId} hung up");
     }
 
     public void Dispose()
     {
-        Hangup();
+        HangupAnserCall();
     }
-
-    public string BridgeId => _bridgeId;
-    public bool IsActive => _isActive;
-    public RTCPeerConnection AliceWebRtc => _aliceWebRtc;
-    public string AliceSessionId => _aliceSessionId;
-    public string BobSessionId => _bobSessionId;
-    public bool AliceAccepted => _aliceAccepted;
-    public bool BobAccepted => _bobAccepted;
-    public bool SipCallEstablished => _sipCallEstablished;
 }
