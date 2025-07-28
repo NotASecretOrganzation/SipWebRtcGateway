@@ -9,17 +9,19 @@ namespace ConsoleApp1;
 
 public class CallBridge
 {
-    private readonly ILogger<CallBridge> _logger;
-    private readonly string _bridgeId;
-    private RTCPeerConnection _aliceWebRtc;
-    private RTCPeerConnection _bobWebRtc;
-    private SIPUserAgent _aliceSip;
-    private SIPUserAgent _bobSip;
-    private VoIPMediaSession _aliceMediaSession;
-    private VoIPMediaSession _bobMediaSession;
-    private bool _isActive;
-    private string _aliceSessionId;
-    private string _bobSessionId;
+    protected readonly ILogger<CallBridge> _logger;
+    protected readonly string _bridgeId;
+    protected SIPTransport _aliceTransport;
+    protected SIPTransport _bobTransport;
+    protected RTCPeerConnection _aliceWebRtc;
+    protected RTCPeerConnection _bobWebRtc;
+    protected SIPUserAgent _aliceSip;
+    protected SIPUserAgent _bobSip;
+    protected VoIPMediaSession _aliceMediaSession;
+    protected VoIPMediaSession _bobMediaSession;
+    protected bool _isActive;
+    protected string _aliceSessionId;
+    protected string _bobSessionId;
 
     public CallBridge(ILogger<CallBridge> logger)
     {
@@ -31,6 +33,8 @@ public class CallBridge
     {
         try
         {
+            _aliceTransport = aliceTransport;
+            _bobTransport = bobTransport;
             _aliceSessionId = aliceSessionId;
             _bobSessionId = bobSessionId;
             
@@ -136,14 +140,19 @@ public class CallBridge
         _logger.LogInformation($"RTP bridging set up for bridge {_bridgeId}");
     }
 
-    public async Task<bool> InitiateCall(SIPUserAgent sIPUserAgent, VoIPMediaSession voIPMediaSession, string sipUrl)
+    protected string TransportToSipUrl(string sessionId, SIPTransport transport)
+    {
+        // Convert transport to SIP URL format
+        return $"sip:{sessionId}@{transport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Address}:{transport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Port}";
+    }
+
+    public async Task<bool> InitiateCall()
     {
         try
         {
-            _logger.LogInformation($"Initiating call from {sIPUserAgent}");
-
+            string sipUrl = TransportToSipUrl(BobSessionId,_bobTransport);
             // Initiate SIP calls
-            var callResult = await sIPUserAgent.Call(sipUrl, null, null, voIPMediaSession);
+            var callResult = await _aliceSip.Call(sipUrl, null, null, _aliceMediaSession);
 
             if (callResult)
             {

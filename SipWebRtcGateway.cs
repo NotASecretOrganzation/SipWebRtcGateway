@@ -64,10 +64,10 @@ public partial class SipWebRtcGateway
         sipTransport.AddSIPChannel(new SIPUDPChannel(endpoint));
         
         // Register SIP request handler for this transport
-        sipTransport.SIPTransportRequestReceived += async (localSIPEndPoint, remoteEndPoint, sipRequest) =>
-        {
-            await OnSipRequest(sessionId, localSIPEndPoint, remoteEndPoint, sipRequest);
-        };
+        //sipTransport.SIPTransportRequestReceived += async (localSIPEndPoint, remoteEndPoint, sipRequest) =>
+        //{
+        //    await OnSipRequest(sessionId, localSIPEndPoint, remoteEndPoint, sipRequest);
+        //};
         
         _logger.LogInformation($"Created SIP transport for session {sessionId} on port {endpoint.Port}");
         return sipTransport;
@@ -122,20 +122,10 @@ public partial class SipWebRtcGateway
         if (sipRequest.Method == SIPMethodsEnum.INVITE)
         {
             _logger.LogInformation($"Incoming SIP call from {sipRequest.Header.From.FromURI} to session {sessionId}");
-
-            // Check if this is a call to another WebRTC client (Alice calling Bob)
-            var targetUri = sipRequest.Header.To.ToURI.ToString();
-            var targetSessionId = ExtractSessionIdFromUri(targetUri);
-            
-            if (!string.IsNullOrEmpty(targetSessionId) && _webSocketClients.ContainsKey(targetSessionId))
-            {
-                // This is Alice calling Bob - create a call bridge
-                await HandleAliceToBobCall(sessionId, targetSessionId, sipRequest);
-            }
         }
     }
 
-    private async Task HandleAliceToBobCall(string aliceSessionId, string bobSessionId, SIPRequest sipRequest)
+    private async Task HandleAliceToBobCall(string aliceSessionId, string bobSessionId)
     {
         try
         {
@@ -172,10 +162,12 @@ public partial class SipWebRtcGateway
                     bridgeId = bridge.BridgeId,
                     targetSessionId = aliceSessionId,
                     isInitiator = false,
-                    from = sipRequest.Header.From.FromURI.ToString()
+                    from = SessionIdToFromUri(bobSessionId)
                 });
 
                 _logger.LogInformation($"Alice to Bob call bridge {bridge.BridgeId} created successfully");
+
+                bridge.InitiateCall();
             }
         }
         catch (Exception ex)
@@ -204,6 +196,21 @@ public partial class SipWebRtcGateway
             _logger.LogWarning($"Error extracting session ID from URI {uri}: {ex.Message}");
         }
         return null;
+    }
+
+    private string? SessionIdToFromUri(string sessionId)
+    {
+        // Convert session ID to SIP URI format
+        if (_sipTransports.TryGetValue(sessionId, out SIPTransport? transport))
+        {
+            var domain = $"{transport.GetSIPChannels().First().ListeningEndPoint.Address}:{transport.GetSIPChannels().First().ListeningEndPoint.Port}";
+            return $"sip:{sessionId}@{domain}";
+        }
+        else
+        {
+            _logger.LogWarning($"No SIP transport found for session ID {sessionId}");
+            return null;
+        }
     }
 
     private async Task<RTCPeerConnection> CreateWebRtcPeerConnection(string sessionId)
@@ -546,70 +553,17 @@ public partial class SipWebRtcGateway
         {
             _logger.LogInformation($"Initiating SIP call to {sipUri} for session {sessionId}");
 
-            // Get the SIP transport for this session
-            if (!_sipTransports.TryGetValue(sessionId, out SIPTransport? sipTransport))
+            // Check if this is a bridge call (to another session)
+            var targetSessionId = ExtractSessionIdFromUri(sipUri);
+
+            if (!string.IsNullOrEmpty(targetSessionId) && _webSocketClients.ContainsKey(targetSessionId))
             {
-                _logger.LogError($"No SIP transport found for session {sessionId}");
-                await NotifyBrowserClient(sessionId, "call-failed", "No SIP transport available");
-                return;
-            }
 
-            var sipUserAgent = new SIPUserAgent(sipTransport, null);
-            _sipCalls[sessionId] = sipUserAgent;
-
-            // Create or get existing WebRTC peer connection
-            RTCPeerConnection peerConnection;
-            if (!_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
-            {
-                peerConnection = await CreateWebRtcPeerConnection(sessionId);
-            }
-            else
-            {
-                peerConnection = value;
-            }
-
-            // Create WebRTC offer
-            var offer = peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-
-            // Send offer to browser
-            await NotifyBrowserClient(sessionId, "offer", offer);
-
-            // Create media session
-            var mediaSession = new VoIPMediaSession();
-            _mediaSessions[sessionId] = mediaSession;
-
-            // Create call session
-            var callSession = new CallSession
-            {
-                SipTransport = sipTransport,
-                SipUserAgent = sipUserAgent,
-                WebRtcPeer = peerConnection,
-                MediaSession = mediaSession
-            };
-            _callSessions[sessionId] = callSession;
-
-            // Set up RTP bridging from SIP to WebRTC
-            mediaSession.OnRtpPacketReceived += (rep, media, rtpPkt) =>
-            {
-                if (_webRtcConnections.TryGetValue(sessionId, out RTCPeerConnection? value))
+                if (!string.IsNullOrEmpty(targetSessionId) && _webSocketClients.ContainsKey(targetSessionId))
                 {
-                    value.SendRtpRaw(media, rtpPkt.Payload,
-                        rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
+                    // This is Alice calling Bob - create a call bridge
+                    await HandleAliceToBobCall(sessionId, targetSessionId, sipRequest);
                 }
-            };
-
-            // Initiate SIP call
-            var callResult = await sipUserAgent.Call(sipUri, null, null, mediaSession);
-
-            if (callResult)
-            {
-                _logger.LogInformation($"SIP call successfully initiated to {sipUri}");
-            }
-            else
-            {
-                _logger.LogInformation($"Failed to initiate SIP call to {sipUri}");
-                await NotifyBrowserClient(sessionId, "call-failed", $"Failed to call {sipUri}");
             }
         }
         catch (Exception ex)
