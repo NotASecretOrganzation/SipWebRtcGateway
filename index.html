@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html>
 <head>
     <title>SIP-WebRTC Gateway with Video</title>
@@ -285,6 +285,15 @@
                     case 'bridge-call':
                         await handleBridgeCall(message.data);
                         break;
+                    case 'bridge-establishing':
+                        await handleBridgeEstablishing(message.data);
+                        break;
+                    case 'bridge-established':
+                        await handleBridgeEstablished(message.data);
+                        break;
+                    case 'bridge-failed':
+                        handleBridgeFailed(message.data);
+                        break;
                     case 'bridge-offer':
                         await handleBridgeOffer(message.data);
                         break;
@@ -300,12 +309,18 @@
                     case 'bridge-rejected':
                         handleBridgeRejected(message.data);
                         break;
+                    case 'call-failed':
+                        handleCallFailed(message.data);
+                        break;
                     case 'call-ended':
                         handleCallEnded();
                         break;
                     case 'error':
                         console.error('Server error:', message.data);
                         alert('Call error: ' + message.data);
+                        break;
+                    default:
+                        console.warn('Unknown message type:', message.type);
                         break;
                 }
             } catch (error) {
@@ -476,6 +491,48 @@
         function handleCallEnded() {
             console.log('Call ended by remote party');
             cleanupCall();
+        }
+
+        function handleCallFailed(data) {
+            console.error('Call failed:', data);
+            alert('Call failed: ' + data);
+            cleanupCall();
+        }
+
+        async function handleBridgeEstablishing(bridgeData) {
+            const callDetailsDiv = document.getElementById('callDetails');
+            callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Establishing bridge...</p>`;
+            console.log('Bridge establishing:', bridgeData.bridgeId);
+        }
+
+        async function handleBridgeEstablished(bridgeData) {
+            const callDetailsDiv = document.getElementById('callDetails');
+            callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Bridge established! Starting WebRTC connection...</p>`;
+            console.log('Bridge established:', bridgeData.bridgeId);
+
+            // 橋接已建立，開始 WebRTC 連接
+            try {
+                await initializeWebRTC();
+
+                // 建立 WebRTC offer
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                console.log('Sending bridge offer after bridge established');
+                sendWebSocketMessage('bridge-offer', offer);
+            } catch (error) {
+                console.error('Error starting WebRTC after bridge established:', error);
+            }
+        }
+
+        function handleBridgeFailed(bridgeData) {
+            const callDetailsDiv = document.getElementById('callDetails');
+            callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Bridge failed: ${bridgeData}</p>`;
+            console.log('Bridge failed:', bridgeData);
+
+            setTimeout(() => {
+                cleanupCall();
+            }, 3000);
         }
 
         function sendWebSocketMessage(type, data) {

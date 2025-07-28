@@ -353,6 +353,25 @@ public partial class SipWebRtcGateway
 
             switch (msg.Type)
             {
+                // 客戶端發送的訊息
+                case "make-call":
+                    await InitiateSipCall(sessionId, (string)msg.Data);
+                    break;
+                case "accept-call":
+                    await HandleWebRtcOffer(sessionId, msg.Data);
+                    break;
+                case "reject-call":
+                    await HandleRejectCall(sessionId);
+                    break;
+                case "accept-bridge-call":
+                    await HandleAcceptBridgeCall(sessionId, msg.Data);
+                    break;
+                case "reject-bridge-call":
+                    await HandleRejectBridgeCall(sessionId);
+                    break;
+                case "hang-up":
+                    await HandleHangUp(sessionId);
+                    break;
                 case "offer":
                     await HandleWebRtcOffer(sessionId, msg.Data);
                     break;
@@ -361,18 +380,6 @@ public partial class SipWebRtcGateway
                     break;
                 case "ice-candidate":
                     await HandleIceCandidate(sessionId, msg.Data);
-                    break;
-                case "make-call":
-                    await InitiateSipCall(sessionId, (string)msg.Data);
-                    break;
-                case "hang-up":
-                    await HandleHangUp(sessionId);
-                    break;
-                case "accept-call":
-                    await HandleWebRtcOffer(sessionId, msg.Data);
-                    break;
-                case "reject-call":
-                    await HandleRejectCall(sessionId);
                     break;
                 case "bridge-offer":
                     await HandleBridgeOffer(sessionId, msg.Data);
@@ -383,13 +390,8 @@ public partial class SipWebRtcGateway
                 case "bridge-ice-candidate":
                     await HandleBridgeIceCandidate(sessionId, msg.Data);
                     break;
-                case "accept-bridge-call":
-                    await HandleAcceptBridgeCall(sessionId, msg.Data);
-                    break;
-                case "reject-bridge-call":
-                    await HandleRejectBridgeCall(sessionId);
-                    break;
                 default:
+                    _logger.LogWarning($"Unknown message type: {msg.Type}");
                     break;
             }
         }
