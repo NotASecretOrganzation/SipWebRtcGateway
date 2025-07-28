@@ -842,22 +842,7 @@ public partial class SipWebRtcGateway
 
                 _logger.LogInformation($"Bridge {bridge.BridgeId} established successfully");
 
-                // Now that the bridge is created, accept the call for both parties
-                // This will trigger the SIP call establishment since both parties have already accepted
-                bool aliceAccept = await bridge.AcceptCall(bridgeCallState.AliceSessionId);
-                bool bobAccept = await bridge.AcceptCall(bridgeCallState.BobSessionId);
 
-                if(aliceAccept && bobAccept)
-                {
-                    _logger.LogInformation($"Both parties accepted the bridge call {bridge.BridgeId}");
-                }
-                else
-                {
-                    _logger.LogError($"Failed to accept bridge call for one or both parties");
-                    await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-failed", "Failed to accept bridge call");
-                    await NotifyBrowserClient(bridgeCallState.BobSessionId, "bridge-failed", "Failed to accept bridge call");
-                    return;
-                }
                 await bridge.EstablishSipCall();
 
                 // If SIP call is established, notify clients they can start WebRTC
