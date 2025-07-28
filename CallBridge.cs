@@ -99,11 +99,6 @@ public class CallBridge
 
             _logger.LogInformation($"{(isAlice ? "Alice" : "Bob")} ({sessionId}) accepted the call in bridge {_bridgeId}");
 
-            // If both parties have accepted, establish SIP call
-            if (_aliceAccepted && _bobAccepted && !_sipCallEstablished)
-            {
-                await EstablishSipCall();
-            }
 
             return true;
         }
@@ -115,7 +110,7 @@ public class CallBridge
     }
 
     // New: Method to establish SIP call
-    private async Task EstablishSipCall()
+    public async Task EstablishSipCall()
     {
         try
         {

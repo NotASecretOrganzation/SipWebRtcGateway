@@ -467,71 +467,43 @@ public partial class SipWebRtcGateway
     {
         try
         {
-            // First check if in bridge call state
+            // Find the bridge call state for this session
             var bridgeCallState = _bridgeCallStates.Values.FirstOrDefault(s => 
                 s.AliceSessionId == sessionId || s.BobSessionId == sessionId);
 
-            if (bridgeCallState != null)
+            if (bridgeCallState == null)
             {
-                // Update bridge call state
-                if (sessionId == bridgeCallState.AliceSessionId)
-                {
-                    bridgeCallState.AliceAccepted = true;
-                }
-                else if (sessionId == bridgeCallState.BobSessionId)
-                {
-                    bridgeCallState.BobAccepted = true;
-                }
-
-                var otherSessionId = sessionId == bridgeCallState.AliceSessionId 
-                    ? bridgeCallState.BobSessionId 
-                    : bridgeCallState.AliceSessionId;
-
-                // Notify the other party that call was accepted
-                await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
-                {
-                    acceptedBy = sessionId
-                });
-
-                // If both parties have accepted, establish bridge
-                if (bridgeCallState.AliceAccepted && bridgeCallState.BobAccepted)
-                {
-                    await EstablishBridge(bridgeCallState);
-                }
+                _logger.LogWarning($"No bridge call state found for session {sessionId}");
+                return;
             }
-            else
+
+            // Update acceptance status
+            if (sessionId == bridgeCallState.AliceSessionId)
             {
-                // Check if in established bridge
-                if (_sessionToBridge.TryGetValue(sessionId, out string? bridgeId) &&
-                    _callBridges.TryGetValue(bridgeId, out CallBridge? bridge))
-                {
-                    // Use CallBridge's AcceptCall method
-                    await bridge.AcceptCall(sessionId);
-                    
-                    var otherSessionId = sessionId == bridge.AliceSessionId 
-                        ? bridge.BobSessionId 
-                        : bridge.AliceSessionId;
+                bridgeCallState.AliceAccepted = true;
+                _logger.LogInformation($"Alice ({sessionId}) accepted bridge call {bridgeCallState.BridgeId}");
+            }
+            else if (sessionId == bridgeCallState.BobSessionId)
+            {
+                bridgeCallState.BobAccepted = true;
+                _logger.LogInformation($"Bob ({sessionId}) accepted bridge call {bridgeCallState.BridgeId}");
+            }
 
-                    // Notify the other party that call was accepted
-                    await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
-                    {
-                        acceptedBy = sessionId
-                    });
+            var otherSessionId = sessionId == bridgeCallState.AliceSessionId 
+                ? bridgeCallState.BobSessionId 
+                : bridgeCallState.AliceSessionId;
 
-                    // If SIP call is established, notify clients they can start WebRTC
-                    if (bridge.SipCallEstablished)
-                    {
-                        await NotifyBrowserClient(bridge.AliceSessionId, "sip-call-established", new
-                        {
-                            bridgeId = bridge.BridgeId
-                        });
-                        
-                        await NotifyBrowserClient(bridge.BobSessionId, "sip-call-established", new
-                        {
-                            bridgeId = bridge.BridgeId
-                        });
-                    }
-                }
+            // Notify the other party that call was accepted
+            await NotifyBrowserClient(otherSessionId, "bridge-accepted", new
+            {
+                acceptedBy = sessionId
+            });
+
+            // If both parties have accepted, establish the bridge
+            if (bridgeCallState.AliceAccepted && bridgeCallState.BobAccepted)
+            {
+                _logger.LogInformation($"Both parties accepted, establishing bridge {bridgeCallState.BridgeId}");
+                await EstablishBridge(bridgeCallState);
             }
         }
         catch (Exception ex)
@@ -869,6 +841,38 @@ public partial class SipWebRtcGateway
                 });
 
                 _logger.LogInformation($"Bridge {bridge.BridgeId} established successfully");
+
+                // Now that the bridge is created, accept the call for both parties
+                // This will trigger the SIP call establishment since both parties have already accepted
+                bool aliceAccept = await bridge.AcceptCall(bridgeCallState.AliceSessionId);
+                bool bobAccept = await bridge.AcceptCall(bridgeCallState.BobSessionId);
+
+                if(aliceAccept && bobAccept)
+                {
+                    _logger.LogInformation($"Both parties accepted the bridge call {bridge.BridgeId}");
+                }
+                else
+                {
+                    _logger.LogError($"Failed to accept bridge call for one or both parties");
+                    await NotifyBrowserClient(bridgeCallState.AliceSessionId, "bridge-failed", "Failed to accept bridge call");
+                    await NotifyBrowserClient(bridgeCallState.BobSessionId, "bridge-failed", "Failed to accept bridge call");
+                    return;
+                }
+                await bridge.EstablishSipCall();
+
+                // If SIP call is established, notify clients they can start WebRTC
+                if (bridge.SipCallEstablished)
+                {
+                    await NotifyBrowserClient(bridge.AliceSessionId, "sip-call-established", new
+                    {
+                        bridgeId = bridge.BridgeId
+                    });
+                    
+                    await NotifyBrowserClient(bridge.BobSessionId, "sip-call-established", new
+                    {
+                        bridgeId = bridge.BridgeId
+                    });
+                }
             }
             else
             {
