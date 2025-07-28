@@ -291,6 +291,9 @@
                     case 'bridge-established':
                         await handleBridgeEstablished(message.data);
                         break;
+                    case 'sip-call-established':
+                        await handleSipCallEstablished(message.data);
+                        break;
                     case 'bridge-failed':
                         handleBridgeFailed(message.data);
                         break;
@@ -441,6 +444,26 @@
             }
         }
 
+        async function handleSipCallEstablished(data) {
+            console.log('SIP call established:', data.bridgeId);
+            const callDetailsDiv = document.getElementById('callDetails');
+            callDetailsDiv.innerHTML += `<p><strong>Status:</strong> SIP call established! Starting WebRTC connection...</p>`;
+            
+            // SIP 呼叫已建立，現在可以開始 WebRTC 連接
+            try {
+                await initializeWebRTC();
+
+                // 建立 WebRTC offer
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                console.log('Sending bridge offer after SIP call established');
+                sendWebSocketMessage('bridge-offer', offer);
+            } catch (error) {
+                console.error('Error starting WebRTC after SIP call established:', error);
+            }
+        }
+
         function handleBridgeAccepted(data) {
             const callDetailsDiv = document.getElementById('callDetails');
             callDetailsDiv.innerHTML += `<p><strong>Status:</strong> Call accepted by ${data.acceptedBy}</p>`;
@@ -511,18 +534,7 @@
             console.log('Bridge established:', bridgeData.bridgeId);
 
             // 橋接已建立，開始 WebRTC 連接
-            try {
-                await initializeWebRTC();
-
-                // 建立 WebRTC offer
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-
-                console.log('Sending bridge offer after bridge established');
-                sendWebSocketMessage('bridge-offer', offer);
-            } catch (error) {
-                console.error('Error starting WebRTC after bridge established:', error);
-            }
+            // 這裡不立即開始 WebRTC，而是等待 sip-call-established 訊息
         }
 
         function handleBridgeFailed(bridgeData) {

@@ -22,11 +22,17 @@ public class CallBridge
     protected bool _isActive;
     protected string _aliceSessionId;
     protected string _bobSessionId;
+    protected bool _aliceAccepted;
+    protected bool _bobAccepted;
+    protected bool _sipCallEstablished;
 
     public CallBridge(ILogger<CallBridge> logger)
     {
         _logger = logger;
         _bridgeId = Guid.NewGuid().ToString();
+        _aliceAccepted = false;
+        _bobAccepted = false;
+        _sipCallEstablished = false;
     }
 
     public async Task<bool> EstablishBridge(string aliceSessionId, string bobSessionId, SIPTransport aliceTransport, SIPTransport bobTransport)
@@ -63,9 +69,7 @@ public class CallBridge
             _aliceMediaSession = new VoIPMediaSession();
             _bobMediaSession = new VoIPMediaSession();
 
-            // Set up RTP bridging between Alice and Bob
-            SetupRtpBridging();
-
+            // 注意：此時不設置 RTP 轉發，等待 SIP 呼叫建立後再設置
             _isActive = true;
             _logger.LogInformation($"Call bridge {_bridgeId} created successfully");
 
@@ -75,6 +79,69 @@ public class CallBridge
         {
             _logger.LogError(ex, $"Failed to create call bridge {_bridgeId}");
             return false;
+        }
+    }
+
+    // 新增：接受呼叫的方法
+    public async Task<bool> AcceptCall(string sessionId)
+    {
+        try
+        {
+            bool isAlice = sessionId == _aliceSessionId;
+            if (isAlice)
+            {
+                _aliceAccepted = true;
+            }
+            else
+            {
+                _bobAccepted = true;
+            }
+
+            _logger.LogInformation($"{(isAlice ? "Alice" : "Bob")} ({sessionId}) accepted the call in bridge {_bridgeId}");
+
+            // 如果兩方都接受了，建立 SIP 呼叫
+            if (_aliceAccepted && _bobAccepted && !_sipCallEstablished)
+            {
+                await EstablishSipCall();
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error accepting call for session {sessionId}");
+            return false;
+        }
+    }
+
+    // 新增：建立 SIP 呼叫的方法
+    private async Task EstablishSipCall()
+    {
+        try
+        {
+            _logger.LogInformation($"Both parties accepted, establishing SIP call in bridge {_bridgeId}");
+            
+            // 建立 Alice 到 Bob 的 SIP 呼叫
+            string bobSipUrl = $"sip:{_bobSessionId}@{_bobTransport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Address}:{_bobTransport.GetSIPChannels().FirstOrDefault()?.ListeningSIPEndPoint.Port}";
+            
+            var callResult = await _aliceSip.Call(bobSipUrl, null, null, _aliceMediaSession);
+            
+            if (callResult)
+            {
+                _sipCallEstablished = true;
+                _logger.LogInformation($"SIP call successfully established in bridge {_bridgeId}");
+                
+                // SIP 呼叫建立後，設置 RTP 轉發
+                SetupRtpBridging();
+            }
+            else
+            {
+                _logger.LogWarning($"Failed to establish SIP call in bridge {_bridgeId}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error establishing SIP call in bridge {_bridgeId}");
         }
     }
 
@@ -274,4 +341,7 @@ public class CallBridge
     public RTCPeerConnection BobWebRtc => _bobWebRtc;
     public string AliceSessionId => _aliceSessionId;
     public string BobSessionId => _bobSessionId;
+    public bool AliceAccepted => _aliceAccepted;
+    public bool BobAccepted => _bobAccepted;
+    public bool SipCallEstablished => _sipCallEstablished;
 } 
