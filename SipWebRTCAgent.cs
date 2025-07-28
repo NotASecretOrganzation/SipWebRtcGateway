@@ -7,7 +7,7 @@ using SIPSorceryMedia.Abstractions;
 
 namespace ConsoleApp1;
 
-public class CallBridge2
+public class SipWebRTCAgent
 {
     protected readonly ILogger<CallBridge> _logger;
     protected readonly string _bridgeId;
@@ -21,8 +21,12 @@ public class CallBridge2
     protected string _aliceSessionId;
     protected bool _aliceAccepted;
     protected bool _sipCallEstablished;
+    public Func<SIPUserAgent, SIPRequest, bool> answerCallback;
 
-    public CallBridge2(ILogger<CallBridge> logger, string aliceSessionId, SIPTransport aliceTransport)
+    public SipWebRTCAgent(
+        ILogger<CallBridge> logger,
+        string aliceSessionId,
+        SIPTransport aliceTransport)
     {
         _logger = logger;
         _bridgeId = Guid.NewGuid().ToString();
@@ -44,9 +48,12 @@ public class CallBridge2
                        rtpPkt.Header.Timestamp, rtpPkt.Header.MarkerBit, rtpPkt.Header.PayloadType);
             };
             _logger.LogInformation($"Incoming call for Alice ({aliceSessionId}) in bridge {_bridgeId}");
-            SIPServerUserAgent? useragent = ua.AcceptCall(req);
-            await _aliceCallAgent.Answer(useragent, _aliceAnswerCallMediaSession);
-            await _aliceAnswerCallMediaSession.Start();
+            if(answerCallback?.Invoke(ua,req)??false)
+            {
+                SIPServerUserAgent? useragent = ua.AcceptCall(req);
+                await _aliceCallAgent.Answer(useragent, _aliceAnswerCallMediaSession);
+                await _aliceAnswerCallMediaSession.Start();
+            }
         };
     }
 
